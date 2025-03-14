@@ -1961,7 +1961,7 @@ let hasSideEffects = false in {
 
 
 // copyPhysreg is hard-coded in NVPTXInstrInfo.cpp
-let IsSimpleMove=1, hasSideEffects=0, isAsCheapAsAMove=1 in {
+let hasSideEffects=0, isAsCheapAsAMove=1 in {
   def IMOV1rr :  NVPTXInst<(outs Int1Regs:$dst), (ins Int1Regs:$sss),
                            "mov.pred \t$dst, $sss;", []>;
   def IMOV16rr : NVPTXInst<(outs Int16Regs:$dst), (ins Int16Regs:$sss),
@@ -2324,7 +2324,7 @@ def SDTCallArgProfile : SDTypeProfile<0, 2, [SDTCisInt<0>]>;
 def SDTCallArgMarkProfile : SDTypeProfile<0, 0, []>;
 def SDTCallVoidProfile : SDTypeProfile<0, 1, []>;
 def SDTCallValProfile : SDTypeProfile<1, 0, []>;
-def SDTMoveParamProfile : SDTypeProfile<1, 1, []>;
+def SDTMoveParamProfile : SDTypeProfile<1, 1, [SDTCisInt<0>, SDTCisInt<1>]>;
 def SDTStoreRetvalProfile : SDTypeProfile<0, 2, [SDTCisInt<0>]>;
 def SDTStoreRetvalV2Profile : SDTypeProfile<0, 3, [SDTCisInt<0>]>;
 def SDTStoreRetvalV4Profile : SDTypeProfile<0, 5, [SDTCisInt<0>]>;
@@ -2688,29 +2688,14 @@ def DeclareScalarRegInst :
             ".reg .b$size param$a;",
             [(DeclareScalarParam (i32 imm:$a), (i32 imm:$size), (i32 1))]>;
 
-class MoveParamInst<ValueType T, NVPTXRegClass regclass, string asmstr> :
-  NVPTXInst<(outs regclass:$dst), (ins regclass:$src),
-            !strconcat("mov", asmstr, " \t$dst, $src;"),
-            [(set T:$dst, (MoveParam T:$src))]>;
-
 class MoveParamSymbolInst<NVPTXRegClass regclass, Operand srcty, ValueType vt,
                           string asmstr> :
   NVPTXInst<(outs regclass:$dst), (ins srcty:$src),
             !strconcat("mov", asmstr, " \t$dst, $src;"),
             [(set vt:$dst, (MoveParam texternalsym:$src))]>;
 
-def MoveParamI64 : MoveParamInst<i64, Int64Regs, ".b64">;
-def MoveParamI32 : MoveParamInst<i32, Int32Regs, ".b32">;
-
-def MoveParamSymbolI64 : MoveParamSymbolInst<Int64Regs, i64imm, i64, ".b64">;
-def MoveParamSymbolI32 : MoveParamSymbolInst<Int32Regs, i32imm, i32, ".b32">;
-
-def MoveParamI16 :
-  NVPTXInst<(outs Int16Regs:$dst), (ins Int16Regs:$src),
-            "cvt.u16.u32 \t$dst, $src;", // ??? Why cvt.u16.u32 ?
-            [(set i16:$dst, (MoveParam i16:$src))]>;
-def MoveParamF64 : MoveParamInst<f64, Float64Regs, ".f64">;
-def MoveParamF32 : MoveParamInst<f32, Float32Regs, ".f32">;
+def MOV64_PARAM : MoveParamSymbolInst<Int64Regs, i64imm, i64, ".b64">;
+def MOV32_PARAM : MoveParamSymbolInst<Int32Regs, i32imm, i32, ".b32">;
 
 class PseudoUseParamInst<NVPTXRegClass regclass, ValueType vt> :
   NVPTXInst<(outs), (ins regclass:$src),
@@ -3282,68 +3267,19 @@ def : Pat<(i32 (int_nvvm_fshr_clamp i32:$hi, i32:$lo, i32:$amt)),
 def : Pat<(i32 (int_nvvm_fshr_clamp i32:$hi, i32:$lo, (i32 imm:$amt))),
           (SHF_R_CLAMP_i $lo, $hi, imm:$amt)>;
 
-// Count leading zeros
 let hasSideEffects = false in {
-  def CLZr32 : NVPTXInst<(outs Int32Regs:$d), (ins Int32Regs:$a),
-                         "clz.b32 \t$d, $a;", []>;
-  def CLZr64 : NVPTXInst<(outs Int32Regs:$d), (ins Int64Regs:$a),
-                         "clz.b64 \t$d, $a;", []>;
+  foreach RT = [I32RT, I64RT] in {
+    // Count leading zeros
+    def CLZr # RT.Size : NVPTXInst<(outs Int32Regs:$d), (ins RT.RC:$a),
+                                   "clz.b" # RT.Size # " \t$d, $a;",
+                                   [(set i32:$d, (ctlz RT.Ty:$a))]>;
+
+    // Population count
+    def POPCr # RT.Size : NVPTXInst<(outs Int32Regs:$d), (ins RT.RC:$a),
+                                    "popc.b" # RT.Size # " \t$d, $a;",
+                                    [(set i32:$d, (ctpop RT.Ty:$a))]>;
+  }
 }
-
-// 32-bit has a direct PTX instruction
-def : Pat<(i32 (ctlz i32:$a)), (CLZr32 $a)>;
-
-// The return type of the ctlz ISD node is the same as its input, but the PTX
-// ctz instruction always returns a 32-bit value.  For ctlz.i64, convert the
-// ptx value to 64 bits to match the ISD node's semantics, unless we know we're
-// truncating back down to 32 bits.
-def : Pat<(i64 (ctlz i64:$a)), (CVT_u64_u32 (CLZr64 $a), CvtNONE)>;
-def : Pat<(i32 (trunc (i64 (ctlz i64:$a)))), (CLZr64 $a)>;
-
-// For 16-bit ctlz, we zero-extend to 32-bit, perform the count, then trunc the
-// result back to 16-bits if necessary.  We also need to subtract 16 because
-// the high-order 16 zeros were counted.
-//
-// TODO: NVPTX has a mov.b32 b32reg, {imm, b16reg} instruction, which we could
-// use to save one SASS instruction (on sm_35 anyway):
-//
-//   mov.b32 $tmp, {0xffff, $a}
-//   ctlz.b32 $result, $tmp
-//
-// That is, instead of zero-extending the input to 32 bits, we'd "one-extend"
-// and then ctlz that value.  This way we don't have to subtract 16 from the
-// result.  Unfortunately today we don't have a way to generate
-// "mov b32reg, {b16imm, b16reg}", so we don't do this optimization.
-def : Pat<(i16 (ctlz i16:$a)),
-          (SUBi16ri (CVT_u16_u32
-           (CLZr32 (CVT_u32_u16 $a, CvtNONE)), CvtNONE), 16)>;
-def : Pat<(i32 (zext (i16 (ctlz i16:$a)))),
-          (SUBi32ri (CLZr32 (CVT_u32_u16 $a, CvtNONE)), 16)>;
-
-// Population count
-let hasSideEffects = false in {
-  def POPCr32 : NVPTXInst<(outs Int32Regs:$d), (ins Int32Regs:$a),
-                          "popc.b32 \t$d, $a;", []>;
-  def POPCr64 : NVPTXInst<(outs Int32Regs:$d), (ins Int64Regs:$a),
-                          "popc.b64 \t$d, $a;", []>;
-}
-
-// 32-bit has a direct PTX instruction
-def : Pat<(i32 (ctpop i32:$a)), (POPCr32 $a)>;
-
-// For 64-bit, the result in PTX is actually 32-bit so we zero-extend to 64-bit
-// to match the LLVM semantics.  Just as with ctlz.i64, we provide a second
-// pattern that avoids the type conversion if we're truncating the result to
-// i32 anyway.
-def : Pat<(ctpop i64:$a), (CVT_u64_u32 (POPCr64 $a), CvtNONE)>;
-def : Pat<(i32 (trunc (i64 (ctpop i64:$a)))), (POPCr64 $a)>;
-
-// For 16-bit, we zero-extend to 32-bit, then trunc the result back to 16-bits.
-// If we know that we're storing into an i32, we can avoid the final trunc.
-def : Pat<(ctpop i16:$a),
-          (CVT_u16_u32 (POPCr32 (CVT_u32_u16 $a, CvtNONE)), CvtNONE)>;
-def : Pat<(i32 (zext (i16 (ctpop i16:$a)))),
-          (POPCr32 (CVT_u32_u16 $a, CvtNONE))>;
 
 // fpround f32 -> f16
 def : Pat<(f16 (fpround f32:$a)),

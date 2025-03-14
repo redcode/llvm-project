@@ -2039,6 +2039,13 @@ bool NVPTXDAGToDAGISel::tryBFE(SDNode *N) {
       Val = AndLHS;
       Start = CurDAG->getTargetConstant(ShiftAmt, DL, MVT::i32);
       Len = CurDAG->getTargetConstant(NumBits, DL, MVT::i32);
+
+      // If pre-shift AND includes the sign bit in the bitfield, we must use
+      // signed BFE to replicate that bit during bitfield extraction. If the
+      // sign bit is not part of the mask, unsigned BFE will zero out upper bits
+      // of the result
+      if (N->getOpcode() == ISD::SRA)
+        IsSigned = (ShiftAmt + NumBits) == Val.getValueSizeInBits();
     } else if (LHS->getOpcode() == ISD::SHL) {
       // Here, we have a pattern like:
       //
@@ -2197,11 +2204,11 @@ static SDValue selectBaseADDR(SDValue N, SelectionDAG *DAG) {
   if (N.getOpcode() == NVPTXISD::Wrapper)
     return N.getOperand(0);
 
-  // addrspacecast(MoveParam(arg_symbol) to addrspace(PARAM)) -> arg_symbol
+  // addrspacecast(Wrapper(arg_symbol) to addrspace(PARAM)) -> arg_symbol
   if (AddrSpaceCastSDNode *CastN = dyn_cast<AddrSpaceCastSDNode>(N))
     if (CastN->getSrcAddressSpace() == ADDRESS_SPACE_GENERIC &&
         CastN->getDestAddressSpace() == ADDRESS_SPACE_PARAM &&
-        CastN->getOperand(0).getOpcode() == NVPTXISD::MoveParam)
+        CastN->getOperand(0).getOpcode() == NVPTXISD::Wrapper)
       return selectBaseADDR(CastN->getOperand(0).getOperand(0), DAG);
 
   if (auto *FIN = dyn_cast<FrameIndexSDNode>(N))
