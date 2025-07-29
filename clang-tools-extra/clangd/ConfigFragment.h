@@ -341,6 +341,19 @@ struct Fragment {
     ///   Delimiters: empty pair of delimiters "()" or "<>"
     ///   FullPlaceholders: full name of both type and parameter
     std::optional<Located<std::string>> ArgumentLists;
+    /// Add #include directives when accepting code completions. Config
+    /// equivalent of the CLI option '--header-insertion'
+    /// Valid values are enum Config::HeaderInsertionPolicy values:
+    ///   "IWYU": Include what you use. Insert the owning header for top-level
+    ///     symbols, unless the header is already directly included or the
+    ///     symbol is forward-declared
+    ///   "Never": Never insert headers
+    std::optional<Located<std::string>> HeaderInsertion;
+    /// Will suggest code patterns & snippets.
+    /// Values are Config::CodePatternsPolicy:
+    ///   All  => enable all code patterns and snippets suggestion
+    ///   None => disable all code patterns and snippets suggestion
+    std::optional<Located<std::string>> CodePatterns;
   };
   CompletionBlock Completion;
 
@@ -380,6 +393,17 @@ struct Fragment {
     std::vector<Located<std::string>> DisabledModifiers;
   };
   SemanticTokensBlock SemanticTokens;
+
+  /// Configures documentation style and behaviour.
+  struct DocumentationBlock {
+    /// Specifies the format of comments in the code.
+    /// Valid values are enum Config::CommentFormatPolicy values:
+    /// - Plaintext: Treat comments as plain text.
+    /// - Markdown: Treat comments as Markdown.
+    /// - Doxygen: Treat comments as doxygen.
+    std::optional<Located<std::string>> CommentFormat;
+  };
+  DocumentationBlock Documentation;
 };
 
 } // namespace config
